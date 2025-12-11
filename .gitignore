@@ -1,0 +1,145 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+venv/
+.venv/
+bcv-backend-py3.12/
+env.bak/
+venv.bak/
+.build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Env files
+.env
+
+
+
+# Python version (PyEnv)
+.python-version
+
+# Installer logs
+node_modules
+frontend-next/.next/
+.next/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# Celery task queue / workers
+celerybeat-schedule
+*.celerybeat-schedule
+
+# Django stuff:
+*.log
+staticfiles/
+local_settings.py
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# VS Code
+.vscode/
+
+# PyCharm
+.idea/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# pytest
+.pytest_cache/
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*~
+
+# VS Code directories
+.vscode/
+
+# Editor specific
+*.sublime-workspace
+*.sublime-project
+*.swp
+*.idea/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Application logs
+logs
+
+# Env files
+.env
+**/*.env*
+!**/*.env*.example
+
+Henil/
+
+app/chroma_db
+
+/storage/tenant_datasets/
+app/docs
+
+# Cursor rules
+.cursorrules
+
+# Settings
+settings.json
+
+# Local files
+local/
+
+chroma_db/
+

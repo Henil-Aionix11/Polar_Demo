@@ -1,0 +1,12 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-slate-50 text-slate-900;
+}
+
+.glass {
+  @apply bg-white/80 backdrop-blur border border-slate-200 shadow-lg;
+}
+
