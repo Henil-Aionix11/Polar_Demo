@@ -1,0 +1,30 @@
+# Backend Dockerfile for FastAPI application
+FROM python:3.11-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements file
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY app ./app
+COPY load_s3_test.py .
+
+# Create necessary directories
+RUN mkdir -p tmp
+
+# Expose port 5000
+EXPOSE 5000
+
+# Run the application with uvicorn
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5000"]

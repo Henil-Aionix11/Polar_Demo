@@ -17,6 +17,10 @@ class Settings:
     Centralized settings with environment overrides.
     """
 
+    # Data/location
+    download_dir: str = os.getenv(
+        "DOWNLOAD_DIR", str(Path(__file__).resolve().parent.parent / "tmp")
+    )
     aws_region: str = os.getenv("AWS_REGION", "us-east-1")
     s3_bucket: Optional[str] = os.getenv("S3_BUCKET")
     openai_api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
@@ -24,6 +28,7 @@ class Settings:
     preview_limit: int = int(os.getenv("PREVIEW_LIMIT", "100"))
     max_preview_rows: int = int(os.getenv("MAX_PREVIEW_ROWS", "500"))
     cache_ttl_seconds: int = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
+    max_sql_attempts: int = int(os.getenv("MAX_SQL_ATTEMPTS", "5"))
 
 
 @lru_cache()

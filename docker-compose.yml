@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: polar-backend
+    ports:
+      - "5000:5000"
+    env_file:
+      - ./app/.env  # Load environment variables from app/.env
+    environment:
+      # Override or set additional environment variables here
+      - AWS_REGION=${AWS_REGION:-us-east-1}  # Provide default if not set
+    volumes:
+      # Mount tmp directory for file storage
+      - ./tmp:/app/tmp
+    networks:
+      - polar-network
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: polar-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      # API URL for frontend to communicate with backend
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:5000}
+    depends_on:
+      - backend
+    networks:
+      - polar-network
+    restart: unless-stopped
+
+networks:
+  polar-network:
+    driver: bridge

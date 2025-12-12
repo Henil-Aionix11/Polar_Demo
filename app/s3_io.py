@@ -25,14 +25,17 @@ def download_to_local(s3_path: str) -> Path:
     """
     Download an S3 object to a temporary local file.
     """
-    bucket_env = get_settings().s3_bucket
+    settings = get_settings()
+    bucket_env = settings.s3_bucket
     bucket, key = _ensure_bucket(s3_path)
     # Optional override: if s3_bucket env is set, force that bucket.
     bucket = bucket_env or bucket
 
     s3 = boto3.client("s3", region_name=get_settings().aws_region)
     suffix = Path(key).suffix or ".bin"
-    tmp_file = Path(tempfile.gettempdir()) / f"s3obj-{uuid.uuid4().hex}{suffix}"
+    download_dir = Path(settings.download_dir)
+    download_dir.mkdir(parents=True, exist_ok=True)
+    tmp_file = download_dir / f"s3obj-{uuid.uuid4().hex}{suffix}"
     with open(tmp_file, "wb") as f:
         s3.download_fileobj(bucket, key, f)
     return tmp_file

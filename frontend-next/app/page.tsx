@@ -4,15 +4,17 @@ import { useEffect, useState } from "react";
 import clsx from "classnames";
 
 type LoadResponse = {
+  dataset_id?: string;
   session: string;
   columns: Record<string, string>;
   row_count: number;
   preview: Array<Record<string, unknown>>;
 };
 
-type NLQResponse = {
-  sql: string;
+type NLExprResponse = {
+  code: string;
   preview: Array<Record<string, unknown>>;
+  row_count?: number;
   error?: string | null;
 };
 
@@ -21,25 +23,29 @@ type PageResponse = {
   total: number;
 };
 
+type OpenResponse = LoadResponse;
+
 const apiBase = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
 const DEFAULT_PAGE_SIZE = 500;
+const STORAGE_DATASET_ID = "dataset_id";
 
 export default function Page() {
   const [s3Path, setS3Path] = useState("s3://training-data-kg/100mb.xlsx");
+  const [datasetId, setDatasetId] = useState<string | null>(null);
   const [session, setSession] = useState<string | null>(null);
   const [columns, setColumns] = useState<Record<string, string>>({});
   const [rowCount, setRowCount] = useState(0);
   const [question, setQuestion] = useState("");
-  const [sql, setSql] = useState("--");
+  const [code, setCode] = useState("--");
   const [preview, setPreview] = useState<Array<Record<string, unknown>>>([]);
   const [offset, setOffset] = useState(0);
   const [limit, setLimit] = useState(DEFAULT_PAGE_SIZE);
-  const [activeSql, setActiveSql] = useState<string | null>(null);
+  const [activeCode, setActiveCode] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [paging, setPaging] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [messages, setMessages] = useState<
-    { role: "user" | "assistant"; text: string; kind?: "sql" | "text" | "error" }[]
+    { role: "user" | "assistant"; text: string; kind?: "code" | "text" | "error" }[]
   >([]);
   const [showLoadModal, setShowLoadModal] = useState(false);
 
@@ -51,6 +57,17 @@ export default function Page() {
     if (Array.isArray(value)) return JSON.stringify(value);
     if (typeof value === "object") return JSON.stringify(value);
     return String(value);
+  };
+
+  const stripRowId = (rows: Array<Record<string, unknown>>) =>
+    rows.map((r) => {
+      const { __row_id, ...rest } = r;
+      return rest;
+    });
+
+  const stripColumns = (cols: Record<string, string>) => {
+    const { __row_id, ...rest } = cols;
+    return rest;
   };
 
   const fetchJson = async (path: string, body: any) => {
@@ -71,12 +88,16 @@ export default function Page() {
     setError(null);
     try {
       const data: LoadResponse = await fetchJson("/dataset/load", { path: s3Path });
+      setDatasetId(data.dataset_id || null);
+      if (data.dataset_id) {
+        localStorage.setItem(STORAGE_DATASET_ID, data.dataset_id);
+      }
       setSession(data.session);
-      setColumns(data.columns || {});
+      setColumns(stripColumns(data.columns || {}));
       setRowCount(data.row_count || 0);
-      setPreview(data.preview || []);
-      setSql("--");
-      setActiveSql(null);
+      setPreview(stripRowId(data.preview || []));
+      setCode("--");
+      setActiveCode(null);
       setMessages([]);
       setOffset(0);
       setLimit(DEFAULT_PAGE_SIZE);
@@ -98,24 +119,27 @@ export default function Page() {
     setLoading(true);
     setError(null);
     try {
-      const data: NLQResponse = await fetchJson("/nlq", {
+      const data: NLExprResponse = await fetchJson("/nlq/expr", {
         session,
         question,
       });
       if (data.error) {
         setError(data.error);
       }
-      setSql(data.sql || "--");
-      setActiveSql(data.sql || null);
-      setPreview(data.preview || []);
+      setCode(data.code || "--");
+      setActiveCode(data.code || null);
+      setPreview(stripRowId(data.preview || []));
+      if (data.row_count !== undefined) {
+        setRowCount(data.row_count);
+      }
       setMessages((m) => [
         ...m,
         { role: "user", text: question, kind: "text" },
-        { role: "assistant", text: data.sql || data.error || "", kind: data.error ? "error" : "sql" },
+        { role: "assistant", text: data.code || data.error || "", kind: data.error ? "error" : "code" },
       ]);
-      if (session) {
+      if (session && !data.error) {
         const requestedLimit = Math.min(rowCount || limit || DEFAULT_PAGE_SIZE, DEFAULT_PAGE_SIZE);
-        await fetchPage(0, requestedLimit, session, data.sql || null);
+        await fetchPage(0, requestedLimit, session, data.code || null);
       }
     } catch (e: any) {
       setError(e.message);
@@ -128,7 +152,7 @@ export default function Page() {
     newOffset: number,
     newLimit?: number,
     explicitSession?: string,
-    sqlOverride?: string | null
+    codeOverride?: string | null
   ) => {
     const activeSession = explicitSession || session;
     if (!activeSession) {
@@ -139,18 +163,18 @@ export default function Page() {
     setPaging(true);
     setError(null);
     try {
-      const sqlToUse = sqlOverride !== undefined ? sqlOverride : activeSql;
+      const codeToUse = codeOverride !== undefined ? codeOverride : activeCode;
       const data: PageResponse = await fetchJson("/dataset/page", {
         session: activeSession,
         offset: newOffset,
         limit: effectiveLimit,
-        sql: sqlToUse || undefined,
+        code: codeToUse || undefined,
       });
-      setPreview(data.rows || []);
+      setPreview(stripRowId(data.rows || []));
       setRowCount(data.total || rowCount);
       setOffset(newOffset);
-      if (sqlOverride !== undefined) {
-        setActiveSql(sqlOverride || null);
+      if (codeOverride !== undefined) {
+        setActiveCode(codeOverride || null);
       }
       if (newLimit !== undefined) {
         setLimit(newLimit);
@@ -162,8 +186,40 @@ export default function Page() {
     }
   };
 
+  const openDataset = async (id: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data: OpenResponse = await fetchJson("/dataset/open", { dataset_id: id });
+      setDatasetId(data.dataset_id || id);
+      if (data.dataset_id) {
+        localStorage.setItem(STORAGE_DATASET_ID, data.dataset_id);
+      }
+      setSession(data.session);
+      setColumns(stripColumns(data.columns || {}));
+      setRowCount(data.row_count || 0);
+      setPreview(stripRowId(data.preview || []));
+      setCode("--");
+      setActiveCode(null);
+      setMessages([]);
+      setOffset(0);
+      setLimit(DEFAULT_PAGE_SIZE);
+      if (data.session) {
+        await fetchPage(0, DEFAULT_PAGE_SIZE, data.session, null);
+      }
+    } catch (e: any) {
+      localStorage.removeItem(STORAGE_DATASET_ID);
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    // On first load, do nothing. User triggers Load.
+    const storedId = typeof window !== "undefined" ? localStorage.getItem(STORAGE_DATASET_ID) : null;
+    if (storedId) {
+      void openDataset(storedId);
+    }
   }, []);
 
   return (
@@ -177,7 +233,7 @@ export default function Page() {
             )}
             {messages.map((m, idx) => {
               const isUser = m.role === "user";
-              const isSql = m.kind === "sql";
+              const isCode = m.kind === "code";
               const isError = m.kind === "error";
               return (
                 <div
@@ -190,9 +246,9 @@ export default function Page() {
                   )}
                 >
                   <div className="text-[11px] uppercase tracking-wide text-slate-400 mb-1">
-                    {isUser ? "You" : isError ? "Error" : isSql ? "Generated SQL" : "Assistant"}
+                    {isUser ? "You" : isError ? "Error" : isCode ? "Generated Polars" : "Assistant"}
                   </div>
-                  {isSql ? (
+                  {isCode ? (
                     <div className="rounded-xl bg-slate-900 text-slate-100 font-mono text-xs px-3 py-2 whitespace-pre overflow-auto shadow-inner">
                       {m.text}
                     </div>
@@ -228,7 +284,7 @@ export default function Page() {
                 </button>
               </div>
             </div>
-            <div className="flex gap-2 mt-3">
+            {/* <div className="flex gap-2 mt-3">
               <button
                 className="flex-1 rounded-xl bg-slate-900 text-white text-sm px-4 py-3 font-semibold hover:bg-black shadow-sm"
                 onClick={runNLQ}
@@ -240,15 +296,15 @@ export default function Page() {
                 className="rounded-xl bg-slate-100 text-slate-700 text-sm px-4 py-3 font-semibold border border-slate-200"
                 onClick={() => {
                   setPreview([]);
-                  setSql("--");
+                  setCode("--");
                   setQuestion("");
-                  setActiveSql(null);
+                  setActiveCode(null);
                   setMessages([]);
                 }}
               >
                 Clear
               </button>
-            </div>
+            </div> */}
           </div>
         </aside>
 

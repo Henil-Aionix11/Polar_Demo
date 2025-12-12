@@ -13,6 +13,7 @@ class CachedFrame:
     schema: Dict[str, str]
     row_count: int
     parquet_path: str
+    dataset_id: str
     created_at: float
 
 
