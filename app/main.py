@@ -195,10 +195,45 @@ def nlq_expr(req: NLExprRequest) -> NLExprResponse:
     try:
         code, lf_result = generate_polars_expr(req.question, cached.lf, cached.schema)
         persist_error = None
+        updated_cells = None
 
         # Heuristic: only persist when the code appears to mutate data.
         if cached.dataset_id and should_persist(code):
             try:
+                # Detect updated cells before persisting
+                old_df = cached.lf.collect()
+                new_df = lf_result.collect()
+                
+                # Track cell changes using vectorized comparison (efficient for large datasets)
+                updated_cells = []
+                if ROW_ID_COL in old_df.columns and ROW_ID_COL in new_df.columns:
+                    # Get common columns (excluding __row_id)
+                    common_cols = [c for c in old_df.columns if c in new_df.columns and c != ROW_ID_COL]
+                    
+                    # For each column, find rows where values changed
+                    for col in common_cols:
+                        # Join old and new dataframes on __row_id
+                        joined = old_df.select([ROW_ID_COL, pl.col(col).alias("old_val")]).join(
+                            new_df.select([ROW_ID_COL, pl.col(col).alias("new_val")]),
+                            on=ROW_ID_COL,
+                            how="inner"
+                        )
+                        
+                        # Find rows where old_val != new_val (comparing as strings to handle nulls)
+                        changed = joined.filter(
+                            pl.col("old_val").cast(pl.Utf8).fill_null("__NULL__") != 
+                            pl.col("new_val").cast(pl.Utf8).fill_null("__NULL__")
+                        )
+                        
+                        # Add to updated_cells list
+                        for row in changed.iter_rows(named=True):
+                            updated_cells.append({
+                                "row_id": row[ROW_ID_COL],
+                                "column": col,
+                                "old_value": str(row["old_val"]) if row["old_val"] is not None else None,
+                                "new_value": str(row["new_val"]) if row["new_val"] is not None else None,
+                            })
+                
                 parquet_path = ensure_row_id_column(Path(cached.parquet_path))
                 schema, row_count = persist_lazyframe(cached.dataset_id, lf_result, parquet_path)
                 lf_result = _load_lazyframe(parquet_path)
@@ -216,10 +251,21 @@ def nlq_expr(req: NLExprRequest) -> NLExprResponse:
             except Exception as exc:  # keep preview but report persistence issue
                 persist_error = f"Persist failed: {exc}"
 
+        # Get total count of result rows
+        total_count = lf_result.select(pl.len()).collect()[0, 0]
+        
+        # Get preview (limited rows for chat display)
         result_preview = lf_result.limit(settings.preview_limit).collect().to_dicts()
-        return NLExprResponse(code=code, preview=result_preview, error=persist_error)
+        
+        return NLExprResponse(
+            code=code, 
+            preview=result_preview, 
+            total_count=total_count,
+            updated_cells=updated_cells if updated_cells else None,
+            error=persist_error
+        )
     except Exception as exc:
-        return NLExprResponse(code="", preview=[], error=str(exc))
+        return NLExprResponse(code="", preview=[], total_count=0, error=str(exc))
 
 
 @app.post("/dataset/page", response_model=PageResponse)

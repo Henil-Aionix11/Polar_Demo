@@ -22,7 +22,9 @@ class NLExprRequest(BaseModel):
 
 class NLExprResponse(BaseModel):
     code: str
-    preview: list
+    preview: list  # Top N rows for chat preview
+    total_count: int = 0  # Total filtered/result rows count
+    updated_cells: Optional[list] = None  # [{"row_id": 1, "column": "Email", "old_value": "x", "new_value": "y"}]
     error: Optional[str] = None
 
 

@@ -37,6 +37,7 @@ Rules:
 - Filters must use boolean expressions; use bitwise &, |, ~ (not Python and/or/not).
 - Never rely on truthiness of DataFrame/LazyFrame; never wrap LazyFrame in if/while.
 - Do not call collect, sink, write, save, or any IO. Do not change schema unless asked.
+- For string comparisons, use case-insensitive matching by converting to lowercase using .str.to_lowercase() before comparing.
 """.strip()
 
     user_prompt = f"""

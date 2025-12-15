@@ -23,8 +23,8 @@ COPY load_s3_test.py .
 # Create necessary directories
 RUN mkdir -p tmp
 
-# Expose port 5000
-EXPOSE 5000
+# Expose port 5001
+EXPOSE 5001
 
 # Run the application with uvicorn
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5001"]

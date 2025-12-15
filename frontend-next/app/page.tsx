@@ -14,7 +14,8 @@ type LoadResponse = {
 type NLExprResponse = {
   code: string;
   preview: Array<Record<string, unknown>>;
-  row_count?: number;
+  total_count?: number;
+  updated_cells?: Array<{ row_id: number; column: string; old_value: string | null; new_value: string | null }>;
   error?: string | null;
 };
 
@@ -45,9 +46,19 @@ export default function Page() {
   const [paging, setPaging] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [messages, setMessages] = useState<
-    { role: "user" | "assistant"; text: string; kind?: "code" | "text" | "error" }[]
+    { role: "user" | "assistant"; text: string; kind?: "code" | "text" | "error" | "preview" | "update"; previewData?: Array<Record<string, unknown>>; totalCount?: number; activeCode?: string; updatedCount?: number }[]
   >([]);
   const [showLoadModal, setShowLoadModal] = useState(false);
+  // Highlighted cells state: Map of "rowId-colName" -> color
+  const [highlightedCells, setHighlightedCells] = useState<Map<string, string>>(new Map());
+  // Filter-related state
+  const [filteredTotalCount, setFilteredTotalCount] = useState(0);
+  // Raw preview with __row_id for highlighting
+  const [rawPreview, setRawPreview] = useState<Array<Record<string, unknown>>>([]);
+  // Track updated row IDs for "View Updated Records" button
+  const [updatedRowIds, setUpdatedRowIds] = useState<Set<number>>(new Set());
+  // Track updated column for each update operation
+  const [lastUpdatedColumn, setLastUpdatedColumn] = useState<string | null>(null);
 
   const totalPages = Math.max(1, Math.ceil((rowCount || preview.length || 1) / limit));
   const currentPage = Math.floor(offset / limit) + 1;
@@ -68,6 +79,51 @@ export default function Page() {
   const stripColumns = (cols: Record<string, string>) => {
     const { __row_id, ...rest } = cols;
     return rest;
+  };
+
+  // Random highlight colors for updated cells
+  const getRandomHighlightColor = () => {
+    const colors = [
+      'rgba(255, 182, 193, 0.6)', // light pink
+      'rgba(173, 216, 230, 0.6)', // light blue
+      'rgba(144, 238, 144, 0.6)', // light green
+      'rgba(255, 255, 224, 0.6)', // light yellow
+      'rgba(230, 230, 250, 0.6)', // lavender
+      'rgba(255, 218, 185, 0.6)', // peach
+      'rgba(175, 238, 238, 0.6)', // pale turquoise
+      'rgba(255, 160, 122, 0.6)', // light salmon
+    ];
+    return colors[Math.floor(Math.random() * colors.length)];
+  };
+
+  // Handle "Show All" button click from chat preview (shows filtered data)
+  const handleShowAllInTable = (code: string | null) => {
+    if (session) {
+      setActiveCode(code);
+      fetchPage(0, limit, session, code);
+    }
+  };
+
+  // Handle "Show All Data" button - reset to full dataset view (keeping chat history)
+  const handleShowAllData = async () => {
+    if (session) {
+      setActiveCode(null); // Clear filter code
+      await fetchPage(0, limit, session, null); // Load original data
+    }
+  };
+
+  // Handle "View Updated Records" button - shows data with highlights visible
+  const handleViewUpdatedRows = async () => {
+    if (session) {
+      setActiveCode(null); // Show all data
+      await fetchPage(0, limit, session, null); // Load original data - highlights will show based on row_ids
+    }
+  };
+
+  // Clear all highlights (for when user wants to reset)
+  const handleClearHighlights = () => {
+    setHighlightedCells(new Map());
+    setUpdatedRowIds(new Set());
   };
 
   const fetchJson = async (path: string, body: any) => {
@@ -95,6 +151,7 @@ export default function Page() {
       setSession(data.session);
       setColumns(stripColumns(data.columns || {}));
       setRowCount(data.row_count || 0);
+      setRawPreview(data.preview || []);
       setPreview(stripRowId(data.preview || []));
       setCode("--");
       setActiveCode(null);
@@ -128,19 +185,96 @@ export default function Page() {
       }
       setCode(data.code || "--");
       setActiveCode(data.code || null);
-      setPreview(stripRowId(data.preview || []));
-      if (data.row_count !== undefined) {
-        setRowCount(data.row_count);
+
+      // Check if this is an update operation (has updated_cells)
+      const isUpdateOperation = data.updated_cells && data.updated_cells.length > 0;
+
+      // Handle updated cells highlighting - use SAME color for all cells in one operation
+      if (isUpdateOperation) {
+        console.log("Updated cells received:", data.updated_cells); // Debug log
+
+        const operationColor = getRandomHighlightColor(); // Pick ONE color for this entire operation
+        const newHighlights = new Map<string, string>();
+        const newUpdatedRowIds = new Set<number>();
+
+        data.updated_cells!.forEach((cell) => {
+          const key = `${cell.row_id}-${cell.column}`;
+          newHighlights.set(key, operationColor); // Same color for all cells
+          newUpdatedRowIds.add(cell.row_id);
+        });
+
+        // Track updated column name
+        if (data.updated_cells!.length > 0) {
+          setLastUpdatedColumn(data.updated_cells![0].column);
+        }
+
+        // Merge with existing updated row IDs (for tracking across operations)
+        setUpdatedRowIds((prev) => {
+          const merged = new Set(prev);
+          newUpdatedRowIds.forEach((id) => merged.add(id));
+          return merged;
+        });
+
+        // For mutations, reload data FIRST to get updated __row_id values
+        if (session) {
+          await fetchPage(0, limit, session, null); // Load original data with new values
+        }
+
+        // THEN set highlights (after rawPreview is updated) - PERSISTS FOR SESSION (no auto-clear)
+        setHighlightedCells((prev) => {
+          // Merge with existing highlights (different operations keep their colors)
+          const merged = new Map(prev);
+          newHighlights.forEach((color, key) => merged.set(key, color));
+          console.log("Highlighting cells:", Array.from(merged.keys())); // Debug log
+          return merged;
+        });
       }
+
+      // Store filtered total count
+      const totalCount = data.total_count || 0;
+      setFilteredTotalCount(totalCount);
+
+      // Add user message
       setMessages((m) => [
         ...m,
         { role: "user", text: question, kind: "text" },
-        { role: "assistant", text: data.code || data.error || "", kind: data.error ? "error" : "code" },
       ]);
-      if (session && !data.error) {
-        const requestedLimit = Math.min(rowCount || limit || DEFAULT_PAGE_SIZE, DEFAULT_PAGE_SIZE);
-        await fetchPage(0, requestedLimit, session, data.code || null);
+
+      // Add assistant response - either error, update, or preview
+      if (data.error) {
+        setMessages((m) => [
+          ...m,
+          { role: "assistant", text: data.error || "", kind: "error" },
+        ]);
+      } else if (isUpdateOperation) {
+        // For updates, show update count with View Updated Records button
+        const updateCount = data.updated_cells!.length;
+        setMessages((m) => [
+          ...m,
+          {
+            role: "assistant",
+            text: data.code || "",
+            kind: "update",
+            updatedCount: updateCount,
+          },
+        ]);
+      } else {
+        // For filters/queries, show preview message with Show All button data
+        const chatPreviewRows = stripRowId(data.preview || []).slice(0, 10);
+        setMessages((m) => [
+          ...m,
+          {
+            role: "assistant",
+            text: data.code || "",
+            kind: "preview",
+            previewData: chatPreviewRows,
+            totalCount: totalCount,
+            activeCode: data.code || undefined,
+          },
+        ]);
       }
+
+      // NOTE: Do NOT auto-load filtered data in table - user must click "Show All"
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -170,6 +304,7 @@ export default function Page() {
         limit: effectiveLimit,
         code: codeToUse || undefined,
       });
+      setRawPreview(data.rows || []);
       setPreview(stripRowId(data.rows || []));
       setRowCount(data.total || rowCount);
       setOffset(newOffset);
@@ -198,6 +333,7 @@ export default function Page() {
       setSession(data.session);
       setColumns(stripColumns(data.columns || {}));
       setRowCount(data.row_count || 0);
+      setRawPreview(data.preview || []);
       setPreview(stripRowId(data.preview || []));
       setCode("--");
       setActiveCode(null);
@@ -227,7 +363,7 @@ export default function Page() {
       <main className="h-full grid grid-cols-1 lg:grid-cols-[440px_1fr] gap-4 p-4">
         {/* Left rail: chat only */}
         <aside className="rounded-2xl border border-slate-100 shadow-[0_10px_30px_rgba(15,23,42,0.04)] bg-white flex flex-col h-full overflow-hidden">
-          <div className="flex-1 overflow-auto px-4 py-4 space-y-3 bg-slate-50">
+          <div className="flex-1 overflow-auto px-4 py-4 space-y-3 bg-slate-50 thin-scrollbar">
             {messages.length === 0 && (
               <div className="text-xs text-slate-400 text-center mt-6">Ask a question to transform the dataset.</div>
             )}
@@ -235,6 +371,8 @@ export default function Page() {
               const isUser = m.role === "user";
               const isCode = m.kind === "code";
               const isError = m.kind === "error";
+              const isPreview = m.kind === "preview";
+              const isUpdate = m.kind === "update";
               return (
                 <div
                   key={idx}
@@ -246,11 +384,86 @@ export default function Page() {
                   )}
                 >
                   <div className="text-[11px] uppercase tracking-wide text-slate-400 mb-1">
-                    {isUser ? "You" : isError ? "Error" : isCode ? "Generated Polars" : "Assistant"}
+                    {isUser ? "You" : isError ? "Error" : isUpdate ? "Updated" : isPreview ? "Results" : isCode ? "Generated Polars" : "Assistant"}
                   </div>
-                  {isCode ? (
+                  {isUpdate ? (
+                    <div className="space-y-2">
+                      {/* Update success message */}
+                      <div className="flex items-center gap-2 text-green-700 bg-green-50 px-3 py-2 rounded-lg">
+                        <span className="text-lg">✓</span>
+                        <span className="font-semibold">{m.updatedCount?.toLocaleString()} cells updated successfully</span>
+                      </div>
+
+                      {/* Generated code (collapsed) */}
+                      <details className="text-xs">
+                        <summary className="cursor-pointer text-slate-500 hover:text-slate-700">View generated code</summary>
+                        <div className="rounded-lg bg-slate-900 text-slate-100 font-mono text-xs px-3 py-2 mt-1 whitespace-pre overflow-auto">
+                          {m.text}
+                        </div>
+                      </details>
+
+                      {/* View Updated Records button - only enabled for last message */}
+                      
+                    </div>
+                  ) : isCode ? (
                     <div className="rounded-xl bg-slate-900 text-slate-100 font-mono text-xs px-3 py-2 whitespace-pre overflow-auto shadow-inner">
                       {m.text}
+                    </div>
+                  ) : isPreview && m.previewData ? (
+                    <div className="space-y-2">
+                      {/* Generated code (collapsed) */}
+                      <details className="text-xs">
+                        <summary className="cursor-pointer text-slate-500 hover:text-slate-700">View generated code</summary>
+                        <div className="rounded-lg bg-slate-900 text-slate-100 font-mono text-xs px-3 py-2 mt-1 whitespace-pre overflow-auto">
+                          {m.text}
+                        </div>
+                      </details>
+
+                      {/* Mini preview table */}
+                      {m.previewData.length > 0 ? (
+                        <div className="overflow-auto max-h-[250px] rounded-lg border border-slate-200 thin-scrollbar">
+                          <table className="min-w-full text-xs border-collapse">
+                            <thead className="sticky top-0 bg-slate-100">
+                              <tr>
+                                {Object.keys(m.previewData[0]).map((col) => (
+                                  <th key={col} className="border-b border-slate-200 px-2 py-1 text-left font-semibold text-slate-600 whitespace-nowrap">
+                                    {col}
+                                  </th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {m.previewData.map((row, rowIdx) => (
+                                <tr key={rowIdx} className={rowIdx % 2 === 0 ? "bg-white" : "bg-slate-50"}>
+                                  {Object.keys(m.previewData![0]).map((col) => (
+                                    <td key={col} className="border-b border-slate-100 px-2 py-1 whitespace-nowrap text-slate-700">
+                                      {formatValue(row[col])}
+                                    </td>
+                                  ))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : (
+                        <div className="text-slate-500 text-xs py-2">No matching rows found.</div>
+                      )}
+
+                      {/* Show All button - only enabled for last message */}
+                      {m.totalCount !== undefined && m.totalCount > 0 && (
+                        <button
+                          onClick={() => handleShowAllInTable(m.activeCode || null)}
+                          disabled={idx !== messages.length - 1}
+                          className={clsx(
+                            "w-full mt-2 rounded-lg text-white text-xs px-3 py-2 font-semibold transition-colors",
+                            idx === messages.length - 1
+                              ? "bg-indigo-600 hover:bg-indigo-700 cursor-pointer"
+                              : "bg-slate-400 cursor-not-allowed opacity-50"
+                          )}
+                        >
+                          Show All ({m.totalCount.toLocaleString()} rows) in Table
+                        </button>
+                      )}
                     </div>
                   ) : (
                     <div className="whitespace-pre-wrap leading-relaxed">{m.text}</div>
@@ -342,11 +555,11 @@ export default function Page() {
               <div className="flex items-center gap-2 text-xs text-slate-600">
                 <span className="px-3 py-1 rounded-full border border-slate-200 bg-white">{s3Path || "No source set"}</span>
                 <button
-                  className="rounded-lg border border-slate-300 bg-white px-3 py-1 font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
-                  onClick={() => loadDataset()}
-                  disabled={loading}
+                  className="rounded-lg border border-indigo-300 bg-indigo-50 px-3 py-1 font-semibold text-indigo-700 hover:bg-indigo-100 disabled:opacity-50"
+                  onClick={handleShowAllData}
+                  disabled={loading || paging}
                 >
-                  Refresh
+                  Show All Data
                 </button>
               </div>
             </div>
@@ -372,18 +585,53 @@ export default function Page() {
                       </tr>
                     </thead>
                     <tbody>
-                      {preview.map((row, idx) => (
-                        <tr key={idx} className={idx % 2 === 0 ? "bg-white" : "bg-slate-50"}>
-                          {Object.keys(preview[0]).map((col) => (
-                            <td
-                              key={col}
-                              className="border border-slate-200 px-4 py-2 align-top text-slate-800 whitespace-nowrap min-w-[160px]"
-                            >
-                              {formatValue(row[col])}
-                            </td>
-                          ))}
-                        </tr>
-                      ))}
+                      {(() => {
+                        // Create pairs of [preview row, raw row] for sorting
+                        const rowPairs = preview.map((row, idx) => ({
+                          row,
+                          rawRow: rawPreview[idx],
+                          idx,
+                        }));
+
+                        // Sort to put highlighted rows at the top
+                        const sortedPairs = [...rowPairs].sort((a, b) => {
+                          const aRowId = a.rawRow?.__row_id;
+                          const bRowId = b.rawRow?.__row_id;
+
+                          // Check if any column in this row is highlighted
+                          const aHasHighlight = Object.keys(preview[0] || {}).some(
+                            (col) => highlightedCells.has(`${aRowId}-${col}`)
+                          );
+                          const bHasHighlight = Object.keys(preview[0] || {}).some(
+                            (col) => highlightedCells.has(`${bRowId}-${col}`)
+                          );
+
+                          if (aHasHighlight && !bHasHighlight) return -1;
+                          if (!aHasHighlight && bHasHighlight) return 1;
+                          return 0;
+                        });
+
+                        return sortedPairs.map(({ row, rawRow, idx: originalIdx }, sortedIdx) => {
+                          const rowId = rawRow?.__row_id;
+                          return (
+                            <tr key={originalIdx} className={sortedIdx % 2 === 0 ? "bg-white" : "bg-slate-50"}>
+                              {Object.keys(preview[0]).map((col) => {
+                                const cellKey = `${rowId}-${col}`;
+                                const highlightColor = highlightedCells.get(cellKey);
+                                return (
+                                  <td
+                                    key={col}
+                                    className="border border-slate-200 px-4 py-2 align-top text-slate-800 whitespace-nowrap min-w-[160px] transition-colors duration-300"
+                                    style={highlightColor ? { backgroundColor: highlightColor } : undefined}
+                                  >
+                                    {formatValue(row[col])}
+                                  </td>
+                                );
+                              })}
+                            </tr>
+                          );
+                        });
+                      })()}
                     </tbody>
                   </table>
                 </div>
