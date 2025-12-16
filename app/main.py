@@ -13,16 +13,27 @@ from .config import get_settings
 from .data_cache import CachedFrame, frame_cache
 from .dataset_store import (
     ROW_ID_COL,
+    create_backup,
+    delete_backup,
     ensure_row_id_column,
+    get_backup_count,
     get_dataset_entry,
+    get_undo_state,
+    has_backup,
+    has_backups,
     load_lazyframe,
     persist_lazyframe,
+    pop_backup,
+    push_backup,
     register_dataset,
+    restore_backup,
+    set_undo_state,
     update_dataset_metadata,
 )
 from .nlq import _execute_polars_expr, generate_polars_expr, should_persist
 from .s3_io import convert_to_parquet_if_needed, download_to_local
 from .schemas import (
+    DownloadRequest,
     LoadRequest,
     LoadResponse,
     NLExprRequest,
@@ -30,9 +41,10 @@ from .schemas import (
     OpenRequest,
     PageRequest,
     PageResponse,
+    UndoRequest,
+    UndoResponse,
     UpdateRequest,
     UpdateResponse,
-    DownloadRequest,
 )
 
 app = FastAPI(title="Polars NLQ Demo", version="0.1.0")
@@ -196,6 +208,7 @@ def nlq_expr(req: NLExprRequest) -> NLExprResponse:
         code, lf_result = generate_polars_expr(req.question, cached.lf, cached.schema)
         persist_error = None
         updated_cells = None
+        undo_count = 0
 
         # Heuristic: only persist when the code appears to mutate data.
         if cached.dataset_id and should_persist(code):
@@ -235,8 +248,16 @@ def nlq_expr(req: NLExprRequest) -> NLExprResponse:
                             })
                 
                 parquet_path = ensure_row_id_column(Path(cached.parquet_path))
+                
+                # ─── Multi-level Undo: push current state onto backup stack ───
+                undo_count = push_backup(parquet_path)
+                
                 schema, row_count = persist_lazyframe(cached.dataset_id, lf_result, parquet_path)
                 lf_result = _load_lazyframe(parquet_path)
+                
+                # ─── Update undo state in metadata ───
+                set_undo_state(cached.dataset_id, undo_count=undo_count, updated_cells=updated_cells)
+                
                 frame_cache.set(
                     req.session,
                     CachedFrame(
@@ -262,6 +283,7 @@ def nlq_expr(req: NLExprRequest) -> NLExprResponse:
             preview=result_preview, 
             total_count=total_count,
             updated_cells=updated_cells if updated_cells else None,
+            undo_count=undo_count,
             error=persist_error
         )
     except Exception as exc:
@@ -388,6 +410,93 @@ def update_dataset(req: UpdateRequest) -> UpdateResponse:
             columns=schema,
             row_count=row_count,
             preview=preview_rows,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/dataset/undo", response_model=UndoResponse)
+def undo_dataset(req: UndoRequest) -> UndoResponse:
+    """
+    Restore dataset to previous state before last mutation.
+    Multi-level undo: pops from backup stack (up to 10 levels).
+    """
+    settings = get_settings()
+    
+    # Load dataset entry
+    try:
+        entry = get_dataset_entry(req.dataset_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    
+    parquet_path = Path(entry["parquet_path"])
+    
+    # Check if undo is available
+    current_undo_count, _ = get_undo_state(req.dataset_id)
+    if current_undo_count == 0 or not has_backups(parquet_path):
+        return UndoResponse(
+            success=False,
+            dataset_id=req.dataset_id,
+            session=req.session or "",
+            columns={},
+            row_count=0,
+            preview=[],
+            message="No more undo available",
+            undo_count=0,
+        )
+    
+    try:
+        # Pop from backup stack (restore v1, shift remaining)
+        # pop_backup now returns remaining count directly (0 if failed)
+        remaining_undo_count = pop_backup(parquet_path)
+        
+        # Also verify with get_backup_count for consistency
+        actual_count = get_backup_count(parquet_path)
+        if actual_count != remaining_undo_count:
+            # Use the actual file count as source of truth
+            remaining_undo_count = actual_count
+        
+        # Update undo state in metadata
+        set_undo_state(req.dataset_id, undo_count=remaining_undo_count)
+        
+        # Reload LazyFrame with restored data
+        lf = _load_lazyframe(parquet_path)
+        schema = _schema_dict(lf)
+        row_count = lf.select(pl.len()).collect()[0, 0]
+        preview_rows = lf.limit(settings.preview_limit).collect().to_dicts()
+        
+        # Update metadata
+        update_dataset_metadata(req.dataset_id, schema=schema, row_count=row_count, parquet_path=parquet_path)
+        
+        # Refresh session cache
+        session = req.session or uuid.uuid4().hex
+        frame_cache.set(
+            session,
+            CachedFrame(
+                lf=lf,
+                schema=schema,
+                row_count=row_count,
+                parquet_path=str(parquet_path),
+                dataset_id=req.dataset_id,
+                created_at=time.time(),
+            ),
+        )
+        
+        # Build message based on remaining levels
+        if remaining_undo_count > 0:
+            message = f"Undo successful - {remaining_undo_count} more undo level(s) available"
+        else:
+            message = "Undo successful - no more undo available"
+        
+        return UndoResponse(
+            success=True,
+            dataset_id=req.dataset_id,
+            session=session,
+            columns=schema,
+            row_count=row_count,
+            preview=preview_rows,
+            message=message,
+            undo_count=remaining_undo_count,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

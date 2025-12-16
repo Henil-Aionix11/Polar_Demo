@@ -16,7 +16,19 @@ type NLExprResponse = {
   preview: Array<Record<string, unknown>>;
   total_count?: number;
   updated_cells?: Array<{ row_id: number; column: string; old_value: string | null; new_value: string | null }>;
+  undo_count?: number;  // Number of available undo levels (0-10)
   error?: string | null;
+};
+
+type UndoResponse = {
+  success: boolean;
+  dataset_id: string;
+  session: string;
+  columns: Record<string, string>;
+  row_count: number;
+  preview: Array<Record<string, unknown>>;
+  message: string;
+  undo_count: number;  // Remaining undo levels after this undo
 };
 
 type PageResponse = {
@@ -51,6 +63,9 @@ export default function Page() {
   const [showLoadModal, setShowLoadModal] = useState(false);
   // Highlighted cells state: Map of "rowId-colName" -> color
   const [highlightedCells, setHighlightedCells] = useState<Map<string, string>>(new Map());
+  // Stack of highlight keys for each operation (for proper undo)
+  // Each entry is an array of cell keys that were highlighted in that operation
+  const [highlightStack, setHighlightStack] = useState<string[][]>([]);
   // Filter-related state
   const [filteredTotalCount, setFilteredTotalCount] = useState(0);
   // Raw preview with __row_id for highlighting
@@ -59,6 +74,8 @@ export default function Page() {
   const [updatedRowIds, setUpdatedRowIds] = useState<Set<number>>(new Set());
   // Track updated column for each update operation
   const [lastUpdatedColumn, setLastUpdatedColumn] = useState<string | null>(null);
+  // Undo state: number of available undo levels (0-10)
+  const [undoCount, setUndoCount] = useState(0);
 
   const totalPages = Math.max(1, Math.ceil((rowCount || preview.length || 1) / limit));
   const currentPage = Math.floor(offset / limit) + 1;
@@ -124,6 +141,80 @@ export default function Page() {
   const handleClearHighlights = () => {
     setHighlightedCells(new Map());
     setUpdatedRowIds(new Set());
+    setHighlightStack([]); // Clear the stack too
+  };
+
+  // Handle Undo button - restore previous state and remove ONLY last operation's highlights
+  const handleUndo = async () => {
+    if (!datasetId || !session) {
+      setError("No dataset loaded");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const data: UndoResponse = await fetchJson("/dataset/undo", {
+        dataset_id: datasetId,
+        session,
+      });
+      if (data.success) {
+        // Get current highlight stack to compute new values
+        const currentStack = [...highlightStack];
+
+        if (currentStack.length > 0) {
+          // Get keys from the last operation to remove
+          const lastOperationKeys = currentStack[currentStack.length - 1];
+          const newStack = currentStack.slice(0, -1);
+
+          // Build new highlighted cells map without the undone operation's keys
+          const newHighlightedCells = new Map(highlightedCells);
+          lastOperationKeys.forEach((key) => newHighlightedCells.delete(key));
+
+          // Rebuild row IDs from remaining stack
+          const newRowIds = new Set<number>();
+          newStack.forEach((opKeys) => {
+            opKeys.forEach((key) => {
+              const rowId = parseInt(key.split("-")[0], 10);
+              if (!isNaN(rowId)) newRowIds.add(rowId);
+            });
+          });
+
+          // Apply all state updates
+          setHighlightStack(newStack);
+          setHighlightedCells(newHighlightedCells);
+          setUpdatedRowIds(newRowIds);
+        }
+
+        // Update session and data
+        setSession(data.session);
+        setColumns(stripColumns(data.columns || {}));
+        setRowCount(data.row_count || 0);
+        setRawPreview(data.preview || []);
+        setPreview(stripRowId(data.preview || []));
+        setUndoCount(data.undo_count || 0);
+
+        // Add undo confirmation message to chat
+        setMessages((m) => [
+          ...m,
+          {
+            role: "assistant",
+            text: data.message || "Changes reverted successfully.",
+            kind: "text",
+          },
+        ]);
+
+        // Refresh full page data
+        if (data.session) {
+          await fetchPage(0, limit, data.session, null);
+        }
+      } else {
+        setError(data.message || "Undo failed");
+      }
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const fetchJson = async (path: string, body: any) => {
@@ -196,11 +287,13 @@ export default function Page() {
         const operationColor = getRandomHighlightColor(); // Pick ONE color for this entire operation
         const newHighlights = new Map<string, string>();
         const newUpdatedRowIds = new Set<number>();
+        const operationKeys: string[] = []; // Track keys for this operation (for undo)
 
         data.updated_cells!.forEach((cell) => {
           const key = `${cell.row_id}-${cell.column}`;
           newHighlights.set(key, operationColor); // Same color for all cells
           newUpdatedRowIds.add(cell.row_id);
+          operationKeys.push(key); // Store for undo stack
         });
 
         // Track updated column name
@@ -228,6 +321,9 @@ export default function Page() {
           console.log("Highlighting cells:", Array.from(merged.keys())); // Debug log
           return merged;
         });
+
+        // Push this operation's keys to the highlight stack (for proper undo)
+        setHighlightStack((prevStack) => [...prevStack, operationKeys]);
       }
 
       // Store filtered total count
@@ -258,6 +354,8 @@ export default function Page() {
             updatedCount: updateCount,
           },
         ]);
+        // Set undo count from backend response
+        setUndoCount(data.undo_count || 0);
       } else {
         // For filters/queries, show preview message with Show All button data
         const chatPreviewRows = stripRowId(data.preview || []).slice(0, 10);
@@ -402,8 +500,6 @@ export default function Page() {
                         </div>
                       </details>
 
-                      {/* View Updated Records button - only enabled for last message */}
-                      
                     </div>
                   ) : isCode ? (
                     <div className="rounded-xl bg-slate-900 text-slate-100 font-mono text-xs px-3 py-2 whitespace-pre overflow-auto shadow-inner">
@@ -553,13 +649,28 @@ export default function Page() {
                 </div>
               </div>
               <div className="flex items-center gap-2 text-xs text-slate-600">
-                <span className="px-3 py-1 rounded-full border border-slate-200 bg-white">{s3Path || "No source set"}</span>
+
                 <button
                   className="rounded-lg border border-indigo-300 bg-indigo-50 px-3 py-1 font-semibold text-indigo-700 hover:bg-indigo-100 disabled:opacity-50"
                   onClick={handleShowAllData}
                   disabled={loading || paging}
                 >
                   Show All Data
+                </button>
+                {/* Undo button - shown when undo is available */}
+                <button
+                  className={clsx(
+                    "rounded-lg px-3 py-1 font-semibold flex items-center gap-1 disabled:opacity-50 transition-colors",
+                    undoCount > 0
+                      ? "border border-amber-400 bg-amber-50 text-amber-700 hover:bg-amber-100"
+                      : "border border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed"
+                  )}
+                  onClick={handleUndo}
+                  disabled={loading || paging || undoCount === 0}
+                  title={undoCount > 0 ? `Undo (${undoCount} level${undoCount > 1 ? 's' : ''} available)` : "No undo available"}
+                >
+                  <span>↩</span>
+                  <span>Undo{undoCount > 0 ? ` (${undoCount})` : ""}</span>
                 </button>
               </div>
             </div>

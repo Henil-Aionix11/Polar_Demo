@@ -25,6 +25,7 @@ class NLExprResponse(BaseModel):
     preview: list  # Top N rows for chat preview
     total_count: int = 0  # Total filtered/result rows count
     updated_cells: Optional[list] = None  # [{"row_id": 1, "column": "Email", "old_value": "x", "new_value": "y"}]
+    undo_count: int = 0  # Number of available undo levels (0 to 10)
     error: Optional[str] = None
 
 
@@ -80,3 +81,21 @@ class DownloadRequest(BaseModel):
         pattern="^(csv|xlsx)$",
     )
 
+
+class UndoRequest(BaseModel):
+    dataset_id: str = Field(..., description="Dataset identifier to undo.")
+    session: Optional[str] = Field(
+        None,
+        description="Optional session to refresh after undo; otherwise a new session will be created.",
+    )
+
+
+class UndoResponse(BaseModel):
+    success: bool
+    dataset_id: str
+    session: str
+    columns: dict
+    row_count: int
+    preview: list
+    message: str  # "Undo successful" or "No more undo available"
+    undo_count: int = 0  # Remaining undo levels after this undo

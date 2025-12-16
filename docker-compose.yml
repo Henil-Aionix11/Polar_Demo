@@ -39,3 +39,5 @@ services:
 networks:
   polar-network:
     driver: bridge
+
+
